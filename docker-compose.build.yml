@@ -1,0 +1,23 @@
+# Contributor override: build both images from this checkout instead of
+# pulling them from Docker Hub.
+#
+#   ./scripts/vendor_cowrie.sh
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# The image names match the published ones, so the plain docker-compose.yml
+# picks up your local build afterwards.
+
+services:
+  cowrie:
+    build:
+      context: ./vendor/cowrie
+      dockerfile: docker/Dockerfile
+    image: jnltedev/avatoris_sshpot-cowrie:${SSHPOT_TAG:-latest}
+    volumes:
+      # Local config overlay, handy while editing cowrie.cfg. The published
+      # image relies on COWRIE_* environment variables instead.
+      - ./cowrie/cowrie.cfg:/cowrie/cowrie-git/etc/cowrie.cfg:ro
+
+  reporter:
+    build: ./reporter
+    image: jnltedev/avatoris_sshpot-reporter:${SSHPOT_TAG:-latest}

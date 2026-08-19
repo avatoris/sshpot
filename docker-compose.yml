@@ -1,0 +1,96 @@
+# Avatoris SSH honeypot - runs from prebuilt images, no local build required.
+#
+#   curl -O https://raw.githubusercontent.com/avatoris/sshpot/main/docker-compose.yml
+#   AVATORIS_API_KEY=your-key docker compose up -d
+#
+# Every knob below is an environment variable with a working default, so you
+# can pass settings on the command line, export them in your shell, or drop
+# them into a .env file next to this one - whichever you prefer. Only
+# AVATORIS_API_KEY is mandatory.
+#
+# To build the images locally instead (contributors), see docker-compose.build.yml.
+
+name: sshpot
+
+volumes:
+  cowrie-etc:
+  cowrie-var:
+  reporter-state:
+
+networks:
+  honeynet:
+
+services:
+  # The fake SSH service. Published image, built from a pinned upstream Cowrie
+  # release with the Dockerfile fix described in patches/cowrie-Dockerfile.
+  cowrie:
+    image: jnltedev/avatoris_sshpot-cowrie:${SSHPOT_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      # Public port of the decoy. Move your real sshd off 22 first (see README)
+      # if you want the honeypot on the standard port.
+      - "${HONEYPOT_PUBLIC_PORT:-22}:2222"
+    environment:
+      # Cowrie reads COWRIE_<SECTION>_<OPTION> straight from the environment,
+      # so its config is overridable without mounting a cowrie.cfg.
+      COWRIE_HONEYPOT_HOSTNAME: ${HONEYPOT_HOSTNAME:-prod-db-02}
+    volumes:
+      - cowrie-etc:/cowrie/cowrie-git/etc
+      - cowrie-var:/cowrie/cowrie-git/var
+    cap_drop:
+      - ALL
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - honeynet
+
+  # Watches Cowrie's JSON log and (optionally) the host's real sshd auth log,
+  # deduplicates per the Avatoris 30-min/IP rule, and reports failed logins.
+  reporter:
+    image: jnltedev/avatoris_sshpot-reporter:${SSHPOT_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      # Required. Get a free key at https://avatoris.com/login. Deliberately
+      # not marked as a compose-required variable, so that plain
+      # `docker compose logs/ps/down` keeps working when it is passed
+      # inline on the command line rather than through .env.
+      AVATORIS_API_KEY: ${AVATORIS_API_KEY:-}
+
+      # Data sources. Host sshd watching is off by default because it needs a
+      # readable auth log on the host; see HOST_AUTH_LOG_PATH below.
+      ENABLE_HONEYPOT_WATCH: ${ENABLE_HONEYPOT_WATCH:-true}
+      ENABLE_HOST_SSHD_WATCH: ${ENABLE_HOST_SSHD_WATCH:-false}
+
+      # Avatoris allows at most one report per target IP every 30 minutes;
+      # further attempts in that window are aggregated into the next report.
+      REPORT_WINDOW_SECONDS: ${REPORT_WINDOW_SECONDS:-1800}
+      # Stays under the API's 30 requests/minute limit with headroom.
+      REPORTS_PER_MINUTE: ${REPORTS_PER_MINUTE:-25}
+      # How often to flush aggregated counts whose window has expired.
+      FLUSH_INTERVAL_SECONDS: ${FLUSH_INTERVAL_SECONDS:-60}
+
+      # Container-internal paths - matched to the mounts below, leave as is.
+      COWRIE_JSON_PATH: /data/cowrie_var/log/cowrie/cowrie.json
+      STATE_DB_PATH: /data/state/reporter.db
+      AUTH_LOG_PATH: /data/auth.log
+    volumes:
+      - cowrie-var:/data/cowrie_var:ro
+      - reporter-state:/data/state
+      # Host auth log. Defaults to /dev/null so this file works on any host
+      # (including macOS) out of the box. To watch your real sshd, set
+      # ENABLE_HOST_SSHD_WATCH=true and point this at the log:
+      # Debian/Ubuntu /var/log/auth.log, RHEL/Fedora /var/log/secure.
+      - ${HOST_AUTH_LOG_PATH:-/dev/null}:/data/auth.log:ro
+    # Grants read access to the host's auth log without running as root.
+    # "adm" is GID 4 on Debian/Ubuntu; check with `getent group adm`.
+    group_add:
+      - "${GROUP_ADD_GID:-4}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - honeynet
+    depends_on:
+      - cowrie
